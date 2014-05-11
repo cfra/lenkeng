@@ -17,6 +17,12 @@
 #include <netinet/in.h>
 #include <net/if.h>
 
+#ifdef DEBUG
+#define dbg_printf(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define dbg_printf(...)
+#endif
+
 int main(int argc, char **argv)
 {
 	int fd;
@@ -112,7 +118,7 @@ int main(int argc, char **argv)
 		}
 		
 		if (received < 20 + 8 + 4) { /* IP + UDP + Counters */
-			fprintf(stderr, "Received packet too short, skip.\n");
+			dbg_printf("Received packet too short, skip.\n");
 			continue;
 		}
 
@@ -120,18 +126,18 @@ int main(int argc, char **argv)
 		uint8_t ip_ihl = 4 * (r_ip_header[0] & 0x0f);
 
 		if (ip_version != 4) {
-			fprintf(stderr, "Received packet is not IPv4. Skip.\n");
+			dbg_printf("Received packet is not IPv4. Skip.\n");
 			continue;
 		}
 
 		if (ip_ihl != 20) {
-			fprintf(stderr, "Received IP header is not 20byte. Skip.\n");
+			dbg_printf("Received IP header is not 20byte. Skip.\n");
 			continue;
 		}
 
 		uint8_t ip_protocol = r_ip_header[9];
 		if (ip_protocol != 17) {
-			fprintf(stderr, "Received packet is not UDP. Skip.\n");
+			dbg_printf("Received packet is not UDP. Skip.\n");
 			continue;
 		}
 
@@ -147,7 +153,7 @@ int main(int argc, char **argv)
 		if (udp_src_port != 2068 || udp_dst_port != 2068) {
 			if (udp_src_port == 2067 && udp_dst_port == 2067)
 				continue;
-			fprintf(stderr, "Data not on expected UDP port. "
+			dbg_printf("Data not on expected UDP port. "
 				"(src==%d,dst==%d)\n", udp_src_port, udp_dst_port);
 			continue;
 		}
@@ -170,7 +176,7 @@ int main(int argc, char **argv)
 					"Received new frame, but missed chunk 0\n");
 				current_frame = -1;
 			} else {
-				fprintf(stderr, "Starting new frame %d\n", frame_no);
+				dbg_printf("Starting new frame %d\n", frame_no);
 				current_frame = frame_no;
 				current_chunk = 0;
 				frame_missed = 0;
@@ -192,25 +198,15 @@ int main(int argc, char **argv)
 			current_chunk += 1;
 		} else if (frame_no == current_frame) {
 			if (!frame_missed) {
-				fprintf(stderr, "Missed a chunk for a frame. (Got chunk %d"
+				dbg_printf("Missed a chunk for a frame. (Got chunk %d"
 					" but expected %d)\n", chunk_no, current_chunk);
 			}
 			frame_missed = 1;
 		}
 
 		if (last_chunk && frame_size != 0 && !frame_missed) {
-			char path[512];
-			FILE *frame;
-
-			fprintf(stderr, "Saving frame %d.\n", current_frame);
-			snprintf(path, 512,
-				"frame-%010d.jpg", current_frame);
-			frame = fopen(path, "wb");
-			if (frame) {
-				fwrite(frame_buffer, frame_size, 1,
-						frame);
-				fclose(frame);
-			}
+			fwrite(frame_buffer, frame_size, 1, stdout);
+			fflush(stdout);
 		}
 	}
 
