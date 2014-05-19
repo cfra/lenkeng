@@ -287,7 +287,12 @@ static void lkr_send_img(struct lk_receiver *lkr,
 		fprintf(stderr, "Error occured writing to stdout\n");
 	}*/
 //	bufferevent_flush(lkr->stdout_buf, EV_WRITE, BEV_FLUSH);
+
+	printf("\r\n--newframe\r\n"
+	       "Content-Type: image/jpeg\r\n"
+	       "Content-Length: %zu\r\n\r\n", buffer_len);
 	fwrite(buffer, buffer_len, 1, stdout);
+	fflush(stdout);
 }
 
 static void lkr_send(evutil_socket_t fd, short what, void *userdata)
