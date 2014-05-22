@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <byteswap.h>
+#include <sys/signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netpacket/packet.h>
@@ -18,17 +19,30 @@
 #include <net/if.h>
 
 #include <event2/event.h>
+#include <event2/buffer.h>
 #include <event2/bufferevent.h>
 
 #define DEBUG 1
 #define FRAMES_PER_SECOND 25
 #define FRAME_BUFFER_SIZE (2 * 1024 * 1024)
+#define TX_BUFFER_LEN 2048
 
 #ifdef DEBUG
 #define dbg_printf(...) fprintf(stderr, __VA_ARGS__)
 #else
 #define dbg_printf(...)
 #endif
+
+struct lk_receiver;
+
+struct lk_client {
+	struct lk_receiver *lkr;
+	struct event_base *event_base;
+	int fd;
+	struct bufferevent *buffer;
+
+	struct lk_client *next;
+};
 
 struct lk_receiver {
 	struct event_base *event_base;
@@ -44,9 +58,13 @@ struct lk_receiver {
 	uint16_t current_chunk;
 	bool frame_missed;
 
-	struct bufferevent *stdout_buf;
 	struct event *tx_timer;
+	char tx_buffer[TX_BUFFER_LEN];
 	unsigned idle_timer;
+
+	int sfd;
+	struct event *server_event;
+	struct lk_client *clients;
 };
 
 static int lk_receiver_load_fallback(struct lk_receiver *lkr)
@@ -282,17 +300,23 @@ static int lk_receiver_create_socket(struct lk_receiver *lkr)
 static void lkr_send_img(struct lk_receiver *lkr, 
 		         unsigned char *buffer, size_t buffer_len)
 {
-	/* TODO: send header */
-/*	if (bufferevent_write(lkr->stdout_buf, buffer, buffer_len)) {
-		fprintf(stderr, "Error occured writing to stdout\n");
-	}*/
-//	bufferevent_flush(lkr->stdout_buf, EV_WRITE, BEV_FLUSH);
+	int written;
 
-	printf("\r\n--newframe\r\n"
-	       "Content-Type: image/jpeg\r\n"
-	       "Content-Length: %zu\r\n\r\n", buffer_len);
-	fwrite(buffer, buffer_len, 1, stdout);
-	fflush(stdout);
+	written = snprintf(lkr->tx_buffer, TX_BUFFER_LEN,
+			"\r\n--newframe\r\n"
+			"Content-Type: image/jpeg\r\n"
+			"Content-Length: %zu\r\n\r\n",
+			buffer_len);
+
+	if (written < 0) {
+		perror("Couldn't print to buffer, abort");
+		exit(1);
+	}
+
+	for (struct lk_client *lkc = lkr->clients; lkc; lkc = lkc->next) {
+		bufferevent_write(lkc->buffer, lkr->tx_buffer, written);
+		bufferevent_write(lkc->buffer, buffer, buffer_len);
+	}
 }
 
 static void lkr_send(evutil_socket_t fd, short what, void *userdata)
@@ -320,15 +344,112 @@ static int lk_receiver_create_tx(struct lk_receiver *lkr)
 
 	lkr->idle_timer = 50;
 
-/*	lkr->stdout_buf = bufferevent_socket_new(lkr->event_base, STDOUT_FILENO, 0);
-	if (!lkr->stdout_buf || bufferevent_enable(lkr->stdout_buf, EV_WRITE)) {
-		fprintf(stderr, "Couldn't initialize/register stdout buffer.\n");
-		return 1;
-	}*/
-
 	lkr->tx_timer = event_new(lkr->event_base, -1, EV_PERSIST, lkr_send, lkr);
 	if (!lkr->tx_timer || event_add(lkr->tx_timer, &frame_interval)) {
 		fprintf(stderr, "Couldn't init/register frame tx timer.\n");
+		return 1;
+	}
+
+	return 0;
+}
+
+static void lkc_event(struct bufferevent *event, short what, void *userdata)
+{
+	struct lk_client *lkc = userdata;
+
+	struct lk_client **i;
+
+	fprintf(stderr, "Client disconnected\n");
+
+	for (i = &lkc->lkr->clients; *i != NULL; i = &(*i)->next) {
+		if (*i == lkc) {
+			fprintf(stderr, "Client unlinked :)\n");
+			*i = lkc->next;
+			break;
+		}
+	}
+
+	bufferevent_free(lkc->buffer);
+	close(lkc->fd);
+	free(lkc);
+}
+
+static void lkr_accept(evutil_socket_t fd, short what, void *userdata)
+{
+	struct lk_receiver *lkr = userdata;
+	struct lk_client *lkc;
+
+	int client_fd;
+	
+	client_fd = accept(fd, NULL, NULL);
+	if (client_fd < 0) {
+		perror("Couldn't accept client!");
+		return;
+	}
+	
+	fprintf(stderr, "Client connected\n");
+
+	lkc = calloc(1, sizeof(*lkc));
+	lkc->lkr = lkr;
+	lkc->event_base = lkr->event_base;
+	lkc->fd = client_fd;
+	lkc->buffer = bufferevent_socket_new(lkr->event_base, lkc->fd, 0);
+	if (!lkc->buffer) {
+		perror("Couldn't create bufferevent!");
+		close(lkc->fd);
+		free(lkc);
+		return;
+	}
+	
+	bufferevent_setcb(lkc->buffer, NULL, NULL, lkc_event, lkc);
+
+	if (bufferevent_enable(lkc->buffer, EV_WRITE)) {
+		perror("Couldn't enable bufferevent!");
+		bufferevent_free(lkc->buffer);
+		close(lkc->fd);
+		free(lkc);
+		return;
+	}
+
+	lkc->next = lkr->clients;
+	lkr->clients = lkc;
+}
+
+static int lk_receiver_create_server(struct lk_receiver *lkr)
+{
+	struct sockaddr_in sai = {
+		.sin_family = AF_INET,
+		.sin_port = htons(3001),
+	};
+	sai.sin_addr.s_addr = INADDR_ANY;
+
+	int on = 1;
+
+	lkr->sfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (lkr->sfd < 0) {
+		perror("Couldn't create server socket");
+		return 1;
+	}
+
+	if (setsockopt(lkr->sfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) {
+		perror("Couldn't set SO_REUSEADDR");
+		return 1;
+	}
+
+	if (bind(lkr->sfd, (struct sockaddr*)&sai, sizeof(sai))) {
+		perror("Couldn't bind server");
+		return 1;
+	}
+
+	if (listen(lkr->sfd, 5)) {
+		perror("Couldn't listen");
+		return 1;
+	}
+
+	lkr->server_event = event_new(lkr->event_base, lkr->sfd, EV_READ |
+			EV_PERSIST, lkr_accept, lkr);
+	if (!lkr->server_event || event_add(lkr->server_event, NULL)) {
+		fprintf(stderr, "Couldn't init/register server accept event.\n");
 		return 1;
 	}
 
@@ -359,7 +480,8 @@ static struct lk_receiver *lk_receiver_new(struct event_base *eb)
 
 	if (lk_receiver_load_fallback(lkr)
 	    || lk_receiver_create_socket(lkr)
-	    || lk_receiver_create_tx(lkr))
+	    || lk_receiver_create_tx(lkr)
+	    || lk_receiver_create_server(lkr))
 		return NULL;
 
 	return lkr;
@@ -369,6 +491,12 @@ int main(int argc, char **argv)
 {
 	struct event_base *eb;
 	struct lk_receiver *lkr;
+
+	struct sigaction sa;
+	sa.sa_handler = SIG_IGN;
+	sa.sa_flags = 0;
+	sigemptyset(&(sa.sa_mask));
+	sigaction(SIGPIPE, &sa, 0);
 
 	eb = event_base_new();
 	if (!eb) {
