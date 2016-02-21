@@ -48,6 +48,7 @@ struct lk_client {
 struct lk_receiver {
 	struct event_base *event_base;
 	char *iface;
+	uint16_t port;
 
 	unsigned char *buffer[3];
 	size_t buffer_len[3];
@@ -419,6 +420,13 @@ static int lk_receiver_create_trigger(struct lk_receiver *lkr)
 		return 1;
 	}
 
+	int one = 1;
+	if (setsockopt(lkr->trigger_socket, SOL_SOCKET, SO_REUSEPORT,
+		       &one, sizeof(one))) {
+		perror("Could not set SO_REUSEPORT");
+		return 1;
+	}
+
 	inet_aton("192.168.168.56", &sin_addr.sin_addr);
 	if (bind(lkr->trigger_socket, (struct sockaddr*)&sin_addr,
 		 sizeof(sin_addr)) < 0) {
@@ -515,7 +523,7 @@ static int lk_receiver_create_server(struct lk_receiver *lkr)
 {
 	struct sockaddr_in sai = {
 		.sin_family = AF_INET,
-		.sin_port = htons(3001),
+		.sin_port = htons(lkr->port),
 	};
 	sai.sin_addr.s_addr = INADDR_ANY;
 
@@ -553,7 +561,8 @@ static int lk_receiver_create_server(struct lk_receiver *lkr)
 }
 
 static struct lk_receiver *lk_receiver_new(struct event_base *eb,
-					   const char *iface)
+					   const char *iface,
+					   uint16_t port)
 {
 	struct lk_receiver *lkr;
 
@@ -561,6 +570,7 @@ static struct lk_receiver *lk_receiver_new(struct event_base *eb,
 
 	lkr->event_base = eb;
 	lkr->iface = strdup(iface);
+	lkr->port = port;
 
 	/* Allocate image buffers.
 	 *
@@ -585,18 +595,44 @@ static struct lk_receiver *lk_receiver_new(struct event_base *eb,
 
 	return lkr;
 }
+static void usage(const char *prog)
+{
+	fprintf(stderr, "Usage: %s -i <interface> -p <port>\n", prog);
+}
 
 int main(int argc, char **argv)
 {
 	struct event_base *eb;
 	struct lk_receiver *lkr;
-	char *iface;
+	char *iface = NULL;
+	uint16_t port = 0;
+	int opt;
 
-	if (argc != 2) {
-		fprintf(stderr, "Usage: %s <interface>\n", argv[0]);
+	while ((opt = getopt(argc, argv, "i:p:")) != -1) {
+		switch(opt) {
+		case 'i':
+			iface = optarg;
+			break;
+		case 'p':
+			port = atoi(optarg);
+			break;
+		default:
+			usage(argv[0]);
+			return 1;
+		}
+	}
+
+	if (!iface) {
+		fprintf(stderr, "Interface unspecified!\n");
+		usage(argv[0]);
 		return 1;
 	}
-	iface = argv[1];
+
+	if (!port) {
+		fprintf(stderr, "Port unspecified!\n");
+		usage(argv[0]);
+		return 1;
+	}
 
 	struct sigaction sa;
 	sa.sa_handler = SIG_IGN;
@@ -610,7 +646,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	lkr = lk_receiver_new(eb, iface);
+	lkr = lk_receiver_new(eb, iface, port);
 
 	if (!lkr)
 		return 1;
