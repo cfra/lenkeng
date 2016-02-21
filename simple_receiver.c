@@ -17,6 +17,7 @@
 #include <net/ethernet.h>
 #include <netinet/in.h>
 #include <net/if.h>
+#include <arpa/inet.h>
 
 #include <event2/event.h>
 #include <event2/buffer.h>
@@ -62,6 +63,12 @@ struct lk_receiver {
 	struct event *tx_timer;
 	char tx_buffer[TX_BUFFER_LEN];
 	unsigned idle_timer;
+
+	struct event *trigger_timer;
+	unsigned char trigger_msg[4096];
+	size_t trigger_msg_len;
+	int trigger_socket;
+	struct sockaddr_in trigger_dest;
 
 	int sfd;
 	struct event *server_event;
@@ -354,6 +361,94 @@ static int lk_receiver_create_tx(struct lk_receiver *lkr)
 	return 0;
 }
 
+static void lkr_trigger(evutil_socket_t fd, short what, void *userdata)
+{
+	struct lk_receiver *lkr = userdata;
+
+	ssize_t sent;
+
+	sent = sendto(lkr->trigger_socket, lkr->trigger_msg,
+		      lkr->trigger_msg_len, 0,
+		      (struct sockaddr*)&lkr->trigger_dest,
+		      sizeof(lkr->trigger_dest));
+
+	if (sent < 0)
+		perror("Could not send UDP trigger packet");
+}
+
+static int lk_receiver_load_trigger_msg(struct lk_receiver *lkr)
+{
+	FILE *f;
+
+	f = fopen("trigger_msg.bin", "rb");
+	if (!f) {
+		perror("Error opening trigger_msg.bin");
+		return 1;
+	}
+	lkr->trigger_msg_len = 0;
+	while (!feof(f)) {
+		size_t bytes_read;
+		bytes_read = fread(lkr->trigger_msg + lkr->trigger_msg_len, 1,
+				   sizeof(lkr->trigger_msg) - lkr->trigger_msg_len,
+				   f);
+		if (bytes_read < 0) {
+			perror("Error reading trigger_msg.bin");
+			return 1;
+		}
+		lkr->trigger_msg_len += bytes_read;
+	}
+	fclose(f);
+	return 0;
+}
+
+static int lk_receiver_create_trigger(struct lk_receiver *lkr)
+{
+	int rv;
+	struct sockaddr_in sin_addr = {
+		.sin_family = AF_INET,
+		.sin_port = htons(48689)
+	};
+
+	rv = lk_receiver_load_trigger_msg(lkr);
+	if (rv)
+		return rv;
+
+	lkr->trigger_socket = socket(AF_INET, SOCK_DGRAM, 0);
+	if (lkr->trigger_socket < 0) {
+		perror("Could not create trigger UDP socket");
+		return 1;
+	}
+
+	inet_aton("192.168.168.56", &sin_addr.sin_addr);
+	if (bind(lkr->trigger_socket, (struct sockaddr*)&sin_addr,
+		 sizeof(sin_addr)) < 0) {
+		perror("Could not bind trigger UDP socket");
+		return 1;
+	}
+
+	if (setsockopt(lkr->trigger_socket, SOL_SOCKET, SO_BINDTODEVICE,
+		       lkr->iface, strlen(lkr->iface) + 1)) {
+		perror("Could not bind trigger UDP socket to device");
+		return 1;
+	}
+	inet_aton("192.168.168.55", &sin_addr.sin_addr);
+	memcpy(&lkr->trigger_dest, &sin_addr, sizeof(sin_addr));
+
+	struct timeval trigger_interval = {
+		.tv_sec = 3
+	};
+
+	lkr->trigger_timer = event_new(lkr->event_base, -1, EV_PERSIST,
+				       lkr_trigger, lkr);
+	if (!lkr->trigger_timer || event_add(lkr->trigger_timer,
+					     &trigger_interval)) {
+		fprintf(stderr, "Could not init/register trigger timer.\n");
+		return 1;
+	}
+
+	return 0;
+}
+
 static void lkc_event(struct bufferevent *event, short what, void *userdata)
 {
 	struct lk_client *lkc = userdata;
@@ -484,6 +579,7 @@ static struct lk_receiver *lk_receiver_new(struct event_base *eb,
 	if (lk_receiver_load_fallback(lkr)
 	    || lk_receiver_create_socket(lkr)
 	    || lk_receiver_create_tx(lkr)
+	    || lk_receiver_create_trigger(lkr)
 	    || lk_receiver_create_server(lkr))
 		return NULL;
 
