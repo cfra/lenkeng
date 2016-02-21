@@ -1,0 +1,19 @@
+A simple program to receive image data from the Lenkeng LKV373 HDMI-extender.
+
+Contents:
+  setup-vlan.sh: Shows how to configure an interface to receive image data from
+                 the extender. It is both important to add the IP address so that
+                 trigger packets can be transmitted and to set the interface to
+                 promisc mode so that packets will be received. (Not 100% sure
+                 on the promisc though, it's been some time since I initially
+                 wrote this and I started the documentation just now)
+  simple_receiver.c: The actual receiver. It provides 25fps of mjpeg via a tcp port
+                     configurable with -p. To select the interface that the data
+                     should be received on, use the -i command line switch.
+
+                     To compile it, you need libevent-dev. Then, you can use
+                     something like this:
+
+                         gcc -o simple_receiver simple_receiver.c -levent
+  fallback.jpg: An image transmitted by simple_receiver when the data received
+                from hdmi grows stale
