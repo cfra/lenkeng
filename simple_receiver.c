@@ -46,6 +46,7 @@ struct lk_client {
 
 struct lk_receiver {
 	struct event_base *event_base;
+	char *iface;
 
 	unsigned char *buffer[3];
 	size_t buffer_len[3];
@@ -276,9 +277,9 @@ static int lk_receiver_create_socket(struct lk_receiver *lkr)
 
 	/* socket buffer? */
 
-	lla.sll_ifindex = if_nametoindex("eth0");
+	lla.sll_ifindex = if_nametoindex(lkr->iface);
 	if (!lla.sll_ifindex) {
-		fprintf(stderr, "Couldn't find 'eth0'.\n");
+		fprintf(stderr, "Couldn't find '%s'.\n", lkr->iface);
 		return 1;
 	}
 
@@ -456,13 +457,15 @@ static int lk_receiver_create_server(struct lk_receiver *lkr)
 	return 0;
 }
 
-static struct lk_receiver *lk_receiver_new(struct event_base *eb)
+static struct lk_receiver *lk_receiver_new(struct event_base *eb,
+					   const char *iface)
 {
 	struct lk_receiver *lkr;
 
 	lkr = calloc(1, sizeof(*lkr));
 
 	lkr->event_base = eb;
+	lkr->iface = strdup(iface);
 
 	/* Allocate image buffers.
 	 *
@@ -491,6 +494,13 @@ int main(int argc, char **argv)
 {
 	struct event_base *eb;
 	struct lk_receiver *lkr;
+	char *iface;
+
+	if (argc != 2) {
+		fprintf(stderr, "Usage: %s <interface>\n", argv[0]);
+		return 1;
+	}
+	iface = argv[1];
 
 	struct sigaction sa;
 	sa.sa_handler = SIG_IGN;
@@ -504,7 +514,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	lkr = lk_receiver_new(eb);
+	lkr = lk_receiver_new(eb, iface);
 
 	if (!lkr)
 		return 1;
