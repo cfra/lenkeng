@@ -21,6 +21,11 @@ Contents:
   fallback.jpg: An image transmitted by simple_receiver when the data received
                 from hdmi grows stale
                 
- Usage:
+Usage:
  
   sudo ./simple_receiver -i eth1 -p 81
+
+Troubleshooting:
+
+"Could not bind trigger UDP socket: Cannot assign requested address": you must assign an ip address to your nic
+                                   `sudo ifconfig eth1 192.168.168.56 up`
