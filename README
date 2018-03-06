@@ -8,7 +8,7 @@ Contents:
                  promisc mode so that packets will be received. (Not 100% sure
                  on the promisc though, it's been some time since I initially
                  wrote this and I started the documentation just now)
-                 
+
   simple_receiver.c: The actual receiver. It provides 25fps of mjpeg via a tcp port
                      configurable with -p. To select the interface that the data
                      should be received on, use the -i command line switch.
@@ -17,13 +17,16 @@ Contents:
                      something like this:
 
                          gcc -o simple_receiver simple_receiver.c -levent
-                         
+
   fallback.jpg: An image transmitted by simple_receiver when the data received
                 from hdmi grows stale
-                
+
 Usage:
- 
+
   sudo ./simple_receiver -i eth1 -p 81
+
+  -i specifies the interface where the LKV373 is connected
+  -p specifies the port on which the mjpeg stream should be served
 
 Troubleshooting:
 
